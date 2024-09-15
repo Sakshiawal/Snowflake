@@ -1,0 +1,170 @@
+create sequence SEQ_AUTHOR_UID
+   start = 1
+   increment = 1
+   ORDER
+   comment = 'Use this to fill in AUTHOR_ID'
+
+use role sysadmin;
+
+//See how the nextval function works
+select seq_author_uid.nextval;
+show sequences; 
+
+select seq_author_uid.nextval, seq_author_uid.nextval;
+
+use role sysadmin;
+
+//Drop and recreate the counter (sequence) so that it starts at 3 
+// then we'll add the other author records to our author table
+create or replace sequence library_card_catalog.public.seq_author_uid
+start = 3 
+increment = 1 
+ORDER
+comment = 'Use this to fill in the AUTHOR_UID every time you add a row';
+
+//Add the remaining author records and use the nextval function instead 
+//of putting in the numbers
+insert into author(author_uid,first_name, middle_name, last_name) 
+values
+(seq_author_uid.nextval, 'Laura', 'K','Egendorf')
+,(seq_author_uid.nextval, 'Jan', '','Grover')
+,(seq_author_uid.nextval, 'Jennifer', '','Clapp')
+,(seq_author_uid.nextval, 'Kathleen', '','Petelinsek');
+
+
+use database library_card_catalog;
+use role sysadmin;
+
+// Create a new sequence, this one will be a counter for the book table
+create or replace sequence library_card_catalog.public.seq_book_uid
+  start = 1
+  increment = 1
+  ORDER
+  comment = 'Use this to fill in the BOOK_UID every time you add a new row';
+
+
+// Create the book table and use the NEXTVAL as the 
+// default value each time a row is added to the table
+
+create or replace table book
+( book_uid number default seq_book_uid.nextval
+ , title varchar(50)
+ , year_published number(4,0)
+);
+
+insert into book(title, year_published)
+values
+ ('Food',2001)
+,('Food',2006)
+,('Food',2008)
+,('Food',2016)
+,('Food',2015);
+
+// Create the relationships table
+// this is sometimes called a "Many-to-Many table"
+create table book_to_author
+( book_uid number
+  ,author_uid number
+);
+
+//Insert rows of the known relationships
+insert into book_to_author(book_uid, author_uid)
+values
+ (1,1)  // This row links the 2001 book to Fiona Macdonald
+,(1,2)  // This row links the 2001 book to Gian Paulo Faleschini
+,(2,3)  // Links 2006 book to Laura K Egendorf
+,(3,4)  // Links 2008 book to Jan Grover
+,(4,5)  // Links 2016 book to Jennifer Clapp
+,(5,6); // Links 2015 book to Kathleen Petelinsek
+
+
+//Check your work by joining the 3 tables together
+//You should get 1 row for every author
+select * 
+from book_to_author ba 
+join author a 
+on ba.author_uid = a.author_uid 
+join book b 
+on b.book_uid=ba.book_uid; 
+
+
+// JSON DDL Scripts
+use database library_card_catalog;
+use role sysadmin;
+
+// Create an Ingestion Table for JSON Data
+create table library_card_catalog.public.author_ingest_json
+(
+  raw_author variant
+);
+
+create file format library_card_catalog.public.json_file_format
+type = 'JSON' 
+compression = 'AUTO' 
+enable_octal = FALSE
+allow_duplicate = FALSE
+strip_outer_array = TRUE
+strip_null_values = FALSE
+ignore_utf8_errors = FALSE; 
+
+select $1
+from @util_db.public.my_internal_stage/author_with_header.json
+(file_format => library_card_catalog.public.json_file_format);
+
+COPY INTO library_card_catalog.public.author_ingest_json
+FROM @util_db.public.my_internal_stage/author_with_header.json
+FILE_FORMAT = (FORMAT_NAME = library_card_catalog.public.json_file_format);
+
+Select raw_author from author_ingest_json;
+
+//returns AUTHOR_UID value from top-level object's attribute
+select raw_author:AUTHOR_UID
+from author_ingest_json;
+
+//returns the data in a way that makes it look like a normalized table
+SELECT 
+ raw_author:AUTHOR_UID
+,raw_author:FIRST_NAME::STRING as FIRST_NAME
+,raw_author:MIDDLE_NAME::STRING as MIDDLE_NAME
+,raw_author:LAST_NAME::STRING as LAST_NAME
+FROM AUTHOR_INGEST_JSON;
+
+CREATE OR REPLACE TABLE LIBRARY_CARD_CATALOG.PUBLIC.NESTED_INGEST_JSON 
+(
+  "RAW_NESTED_BOOK" VARIANT
+);
+
+COPY INTO library_card_catalog.public.NESTED_INGEST_JSON
+FROM @util_db.public.my_internal_stage/json_book_author_nested.txt
+FILE_FORMAT = (FORMAT_NAME = library_card_catalog.public.json_file_format);
+
+
+//a few simple queries
+SELECT RAW_NESTED_BOOK
+FROM NESTED_INGEST_JSON;
+
+SELECT RAW_NESTED_BOOK:year_published
+FROM NESTED_INGEST_JSON;
+
+SELECT RAW_NESTED_BOOK:authors
+FROM NESTED_INGEST_JSON;
+
+//Use these example flatten commands to explore flattening the nested book and author data
+SELECT value:first_name
+FROM NESTED_INGEST_JSON
+,LATERAL FLATTEN(input => RAW_NESTED_BOOK:authors);
+
+SELECT value:first_name
+FROM NESTED_INGEST_JSON
+,table(flatten(RAW_NESTED_BOOK:authors));
+
+//Add a CAST command to the fields returned
+SELECT value:first_name::VARCHAR, value:last_name::VARCHAR
+FROM NESTED_INGEST_JSON
+,LATERAL FLATTEN(input => RAW_NESTED_BOOK:authors);
+
+//Assign new column  names to the columns using "AS"
+SELECT value:first_name::VARCHAR AS FIRST_NM
+, value:last_name::VARCHAR AS LAST_NM
+FROM NESTED_INGEST_JSON
+,LATERAL FLATTEN(input => RAW_NESTED_BOOK:authors);
